@@ -1,0 +1,181 @@
+#!/usr/bin/env ruby
+# == Synopsis
+# 
+# Translate a 2D track file from a single format to many others
+#
+# == Usage
+# 
+#   tracksperanto -w 1920 -h 1080 /Films/Blockbuster/Shots/001/script.shk --only flamestabilizer
+#   
+# == Author
+#   Julik <me@julik.nl>
+
+# Show the message just in case
+$stdout.puts "Starting Tracksperanto. For information and support please contact info#{64.chr}guerilla-di.org"
+
+# Require the xperanto lib, which in turn requires Bundler and pulls in all the gems
+require_relative '../lib/tracksperanto'
+require 'update_hints'
+require 'optparse'
+require 'progressbar'
+
+def disclaimer
+  "Please consider a small donation to keep Tracksperanto going: http://guerilla-di.org/source-and-license/"
+end
+
+options = {}
+$tools = []
+writer_class_name = nil
+readers = Tracksperanto.importer_names
+writers = Tracksperanto.exporter_names
+
+op = OptionParser.new
+
+def tool(*name_option_and_default_value)
+  Proc.new do |value| 
+    name, option, default_value = name_option_and_default_value
+    v = value.nil? ? default_value : value
+    tool_tuple = [name]
+    tool_tuple.push({option => v}) if option
+    
+    $tools.push(tool_tuple)
+  end
+end
+
+def toold(name)
+  Tracksperanto.get_tool(name).action_description
+end
+
+def list_exporters(dest = $stderr)
+  dest.puts "The following export modules are available:"
+  Tracksperanto.exporters.each do | exporter |
+    dest.puts "\t#{exporter.const_name.downcase.inspect} - #{exporter.human_name}"
+  end
+end
+
+def list_importers(dest = $stderr)
+  dest.puts "The following import modules are available:"
+  Tracksperanto.importers.each do | importer |
+    dest.puts "\t#{importer.const_name.downcase.inspect} - #{importer.human_name}"
+  end
+end
+
+class CodeLoaded < RuntimeError; end
+
+op.banner = "Usage: tracksperanto -f ShakeScript -w 1920 -h 1080 /Films/Blockbuster/Shots/001/script.shk"
+op.on("--code PATH_TO_SCRIPT", String, "Load custom Ruby code into tracksperanto") do |c|  
+  unless $code
+    require(c)
+    raise CodeLoaded
+  end
+end
+
+def f(module_list)
+  "\n" + module_list.map{|e| "\t\t\t\t\t%s\n" % e }.join
+end
+
+op.on("-f", "--from TRANSLATOR", String, "Use the specific import translator, must be one of: #{f(readers)}") { |f| options[:importer] = f }
+op.on("-w", "--width WIDTH_IN_PIXELS", Integer, "Absolute input comp width in pixels (will try to autodetect)") { |w| options[:width] = w }
+op.on("-h", "--height HEIGHT_IN_PIXELS", Integer, "Absolute input comp height in pixels (will try to autodetect)") {|w| options[:height] = w }
+op.on("-o", "--only EXPORTER_NAME", String, "Only export the selected format, format must be one of: #{f(writers)}") { |f| writer_class_name = f }
+
+op.on("-xs", "--xscale X_SCALING_FACTOR", Float, toold("Scaler"), &tool("Scaler", :x_factor))
+
+op.on("-pad", "--pad PAD_FRACTION_VALUES_COMMA_SEPARATED", String, toold("Pad")) do | pads|
+  left, right, top, bottom = pads.split(",").map{|e| e.to_f }
+  $tools.push(["Pad", {"left_pad" => left, "right_pad"=> right, "top_pad" => top, "bottom_pad" => bottom}])
+end
+
+op.on("-u", "--undistort K_AND_KCUBE_COMMA_SEPARATED", String, "Remove lens distortion using the Syntheyes algorithm") do | coefficients |
+  k, kcube = coefficients.split(",").map{|e| e.to_f }
+  $tools.push(["LensDisto", {"k" => k, "kcube"=> kcube, "remove" => true}])
+end
+
+op.on("-d", "--distort K_AND_KCUBE_COMMA_SEPARATED", String, "Add lens distortion using the Syntheyes algorithm") do | coefficients |
+  k, kcube = coefficients.split(",").map{|e| e.to_f }
+  $tools.push(["LensDisto", {"k" => k, "kcube"=> kcube, "remove" => false}])
+end
+
+op.on("-crop", "--crop CROP_VALUES_COMMA_SEPARATED", String, toold("Crop")) do | pads|
+  left, right, top, bottom = pads.split(",").map{|e| e.to_i }
+  $tools.push(["Crop", {"left" => left, "right"=> right, "top" => top, "bottom" => bottom}])
+end
+
+op.on("-ys", "--yscale Y_SCALING_FACTOR", Float, toold("Scaler"), &tool("Scaler", :y_factor))
+op.on("-xs", "--xscale X_SCALING_FACTOR", Float, toold("Scaler"), &tool("Scaler", :x_factor))
+
+op.on("-t", "--trim", Float, toold("StartTrim"),  &tool("StartTrim")) # Before slip!
+op.on("-s", "--slip FRAMES", Integer, toold("Slipper"), &tool("Slipper", :slip))
+op.on("-g", "--golden", toold("Golden"), &tool("Golden"))
+op.on("-m", "--min-length LENGTH_IN_FRAMES", Integer, toold("LengthCutoff"), &tool("LengthCutoff", :min_length))
+op.on("-p", "--prefix PREFIX", String, toold("Prefix"), &tool("Prefix", :prefix))
+op.on("-as", "--autoslip", toold("MoveToFirst"), &tool("MoveToFirst"))
+op.on("--lerp", toold("Lerp"), &tool("Lerp"))
+op.on("--flip", toold("Flip"), &tool("Flip"))
+op.on("--flop", toold("Flop"), &tool("Flop"))
+
+# TODO - multiparameters
+op.on("-rx", "--reformat-x NEW_PIX_WIDTH", Integer, "Reformat the comp to this width and scale all tracks to it", &tool("Reformat", :width))
+op.on("-ry", "--reformat-y NEW_PIX_HEIGHT", Integer, "Reformat the comp to this height and scale all tracks to it", &tool("Reformat", :height))
+op.on("-xm", "--xshift X_IN_PIXELS", Float, "Move the points left or right", &tool("Shift", :x_shift))
+op.on("-ym", "--yshift Y_IN_PIXELS", Float, "Move the points up or down", &tool("Shift", :y_shift)) 
+
+
+op.on("--list-exporters", "Show available export modules") do
+  list_exporters; exit(0)
+end
+op.on("--list-importers", "Show available import modules") do
+  list_importers; exit(0)
+end
+op.on("--version", "Show the version and exit") do |v| 
+    puts "Tracksperanto v.#{Tracksperanto::VERSION} running on Ruby #{RUBY_VERSION} on #{RUBY_PLATFORM}"
+    puts "Copyright 2008-#{Time.now.year} by Guerilla-DI (Julik Tarkhanov and contributors)"
+    puts disclaimer
+    UpdateHints.version_check("tracksperanto", Tracksperanto::VERSION, STDOUT)
+    exit(0)
+end
+op.on("--trace", "Output LOTS of info during conversion") { $debug = true }
+
+begin
+  op.parse!
+rescue CodeLoaded
+  $code = true
+  retry
+end
+
+input_file = ARGV.pop
+fail "No input file provided - should be the last argument. Also use the --help option." unless input_file
+fail "Input file #{input_file} does not exist" unless File.exist?(input_file)
+
+pbar = ProgressBar.new("Converting", 100, $stdout)
+progress = lambda do |percent,message| 
+  pbar.set(percent)
+  if $debug
+    STDOUT.puts("[%d -> %s]" % [percent, message])
+    STDOUT.flush
+  end
+end
+
+begin
+  pipe = Tracksperanto::Pipeline::Base.new(:progress_block => progress, :tool_tuples => $tools)
+  pipe.exporters = [Tracksperanto.get_exporter(writer_class_name)] if writer_class_name
+  pipe.run(input_file, options)
+  pbar.finish
+  $stdout.puts "Found and converted %d trackers with %d keyframes." % [pipe.converted_points, pipe.converted_keyframes]
+rescue Tracksperanto::UnknownExporterError => damn
+  $stderr.puts damn.message
+  list_exporters($stderr)
+  fail "Unknown exporter"
+rescue Tracksperanto::UnknownImporterError => damn
+  $stderr.puts damn.message
+  list_importers($stderr)
+  fail "Unknown importer"
+rescue Tracksperanto::UnknownToolError => damn
+  $stderr.puts damn.message
+  fail "This is a bug, please report it"
+rescue Exception => damn
+  fail damn.message
+end
+
+puts disclaimer
+UpdateHints.version_check("tracksperanto", Tracksperanto::VERSION, STDOUT)
